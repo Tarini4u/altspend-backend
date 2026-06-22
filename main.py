@@ -1,13 +1,22 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from dynamic_scraper import get_product_audit_details
+from dynamic_scraper import get_product_audit_details, close_browser
 import traceback
 import sys
 import asyncio
 
-app = FastAPI(title="AltSpend Core Engine")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Let the app run smoothly...
+    yield
+    # Clean up the global persistent browser instance upon server shutdown/restart
+    await close_browser()
 
+app = FastAPI(title="AltSpend Core Engine", lifespan=lifespan)
+
+# Allow Cross-Origin Requests safely from both localhost and your live domains
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,25 +50,22 @@ async def audit_checkout_link(payload: ProductAuditRequest):
     try:
         # Offload execution entirely to an isolated background thread worker
         result = await asyncio.to_thread(run_scraper_in_worker_thread, target_url)
+        
+        # If the scraping failed or returned empty records
+        if not result or not result.get("success"):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=result.get("error", "Could not extract EMI data from the provided URL. Ensure it is a valid product link.")
+            )
+            
         return result
+        
+    except HTTPException as http_ex:
+        # Keep internal HTTP validations passing through cleanly
+        raise http_ex
     except Exception as e:
         error_msg = traceback.format_exc()
         raise HTTPException(
-            status_code=500,
-            detail={"error_summary": str(e), "traceback": error_msg}
-        )
-    try:
-        # Offload execution entirely to an isolated background thread worker
-        result = await asyncio.to_thread(run_scraper_in_worker_thread, target_url)
-        if not result:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Could not extract EMI data from the provided URL. Ensure it is a valid product checkout link."
-            )
-        return result
-    except Exception as e:
-        # Clean logging for production environments
-        raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Scraper execution failed: {str(e)}"
+            detail={"error_summary": str(e), "traceback": error_msg}
         )

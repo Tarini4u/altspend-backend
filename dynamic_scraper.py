@@ -2,27 +2,89 @@ import asyncio
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 import re
+import httpx
+
+# ---- GLOBAL PERSISTENT BROWSER INSTANCE ENGINE ----
+# This keeps one single warm browser instance sitting in memory across API requests.
+# It completely eliminates the 4-6 second lag of opening/closing a brand new browser process.
+_playwright_instance = None
+_global_browser = None
+
+async def get_browser():
+    """Returns the globally shared, active headless browser instance."""
+    global _playwright_instance, _global_browser
+    if _global_browser is None:
+        _playwright_instance = await async_playwright().start()
+        _global_browser = await _playwright_instance.chromium.launch(headless=True)
+    return _global_browser
+
+async def close_browser():
+    """Safely terminates background browser engine layers when shutting down server instances."""
+    global _playwright_instance, _global_browser
+    if _global_browser:
+        await _global_browser.close()
+        _global_browser = None
+    if _playwright_instance:
+        await _playwright_instance.stop()
+        _playwright_instance = None
+
+
+async def clean_and_resolve_url(user_input: str) -> str:
+    """
+    1. Extracts a clean URL from text clutter (like Flipkart's mobile share message).
+    2. Resolves mobile short links (like amzn.in) to their full desktop targets.
+    """
+    # ---- Step 1: Extract pure link from any surrounding text clutter ----
+    url_pattern = r"(https?://[^\s]+)"
+    match = re.search(url_pattern, user_input)
+    
+    # Isolate the link, or fallback to the original string if no URL formatting is matched
+    processed_url = match.group(1).strip() if match else user_input.strip()
+    
+    # ---- Step 2: Resolve mobile short redirects if dealing with an Amazon link ----
+    if "amzn.in" in processed_url:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            # Send a lightning-fast HEAD request to read redirect headers without downloading HTML
+            response = await client.head(processed_url)
+            return str(response.url)
+            
+    # Return the clean URL directly for Flipkart, laptop links, etc.
+    return processed_url
+
 
 async def run_dynamic_scraper(url: str) -> str:
-    """Launches headless Playwright browser to extract raw HTML."""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 720},
-            locale="en-IN"
-        )
-        page = await context.new_page()
-        try:
-            # "commit" finishes execution the moment data stream begins arriving
-            await page.goto(url, wait_until="commit", timeout=20000)
-        except Exception:
-            pass  # Handled early network constraint gracefully
+    """Launches headless Playwright browser tab to extract raw HTML with heavy media optimization elements blocked."""
+    target_url = await clean_and_resolve_url(url)
+    
+    # Grab our persistent warm memory browser instance
+    browser = await get_browser()
+    
+    context = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        viewport={"width": 1280, "height": 720},
+        locale="en-IN"
+    )
+    page = await context.new_page()
+    
+    # 🏎️ OPTIMIZATION: Block heavy image, css, layout fonts, and video tracking scripts natively
+    await page.route("**/*", lambda route: 
+        asyncio.create_task(route.abort()) if route.request.resource_type in ["image", "stylesheet", "font", "media"] 
+        else asyncio.create_task(route.continue_())
+    )
 
-        await page.wait_for_timeout(3000)  # Settle elements (optimized from 5s to 3s for faster API response)
-        html_content = await page.content()
-        await browser.close()
-        return html_content
+    try:
+        # "commit" finishes execution the moment data stream begins arriving from e-commerce nodes
+        await page.goto(target_url, wait_until="commit", timeout=20000)
+    except Exception:
+        pass  # Handled early network constraint gracefully
+
+    await page.wait_for_timeout(3000)  # Settle elements (optimized for faster API response)
+    html_content = await page.content()
+    
+    # Crucial: Only close the contextual tab, NOT the entire global background browser!
+    await context.close() 
+    return html_content
+
 
 async def get_product_audit_details(url: str) -> dict:
     """Fetches HTML, parses product info, and runs the AltSpend Audit Matrix."""
@@ -32,7 +94,7 @@ async def get_product_audit_details(url: str) -> dict:
 
     soup = BeautifulSoup(html_data, "html.parser")
     
-    # 1. Fallback-Resilient Base Price Extraction Matrix
+    # Base Price Extraction Matrix
     base_price = 0.0
     price_selectors = [
         ("span", "a-price-whole"),
@@ -66,7 +128,7 @@ async def get_product_audit_details(url: str) -> dict:
 
     audited_plans = []
 
-    # 2. Map structural payload through our AltSpend calculations matrix
+    # Map structural payload through our AltSpend calculations matrix
     for plan in detected_no_cost_plans:
         months = plan["tenure_months"]
         monthly_emi_nominal = round(base_price / months, 2)

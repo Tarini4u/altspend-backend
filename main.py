@@ -1,112 +1,107 @@
-import sys
-import asyncio
-
-# 🎯 FIX 1: Apply the Windows Event Loop Policy globally at initialization 
-# This eliminates Uvicorn loop contention without needing thread isolation.
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request, status
-from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
-from dynamic_scraper import get_product_audit_details, close_browser, get_browser
-import traceback
 import json
+import math
 import re
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from dynamic_scraper import ProductScraper
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Handles startup orchestration and system resource wind-downs smoothly.
-    """
-    # 🚀 FIX 2: Warm-Up Boot. Instantiates the browser on server startup.
-    # The very first user will experience zero cold-start delay.
-    print("🚀 Waking up core system engines and warming background browser layers...")
-    try:
-        await get_browser()
-        print("✅ Background browser engine warmed up and active.")
-    except Exception as e:
-        print(f"⚠️ Pre-warming browser failed during boot sequence: {e}")
+app = FastAPI(title="Altspend Core Fintech Engine API")
+scraper = ProductScraper()
 
-    yield
+# Load central banking configurations once on engine startup
+with open("config.json", "r") as f:
+    config_data = json.load(f)
+
+class SearchRequest(BaseModel):
+    # Keeping the field name as 'url' to prevent breaking your current frontend payload
+    url: str 
+
+def calculate_reducing_emi(principal, annual_rate, months):
+    """Standard regulatory reducing balance EMI formula execution"""
+    # 🎯 STEP 0: Zero-rate guard condition to prevent ZeroDivisionError on No-Cost EMI
+    if annual_rate == 0:
+        return round(principal / months, 2)
+
+    r = (annual_rate / 12) / 100
+    emi = (principal * r * math.pow(1 + r, months)) / (math.pow(1 + r, months) - 1)
+    return round(emi, 2)
+
+@app.post("/api/audit-product")
+async def audit_product_link(request: SearchRequest):
+    raw_input = request.url.strip()
     
-    # Clean up the global persistent browser instance upon server shutdown/restart
-    print("🧹 Spinning down background browser memory layers...")
-    await close_browser()
-    print("👍 System shutdown complete.")
-
-app = FastAPI(title="AltSpend Core Engine", lifespan=lifespan)
-
-# Allow Cross-Origin Requests safely from both localhost and your live domains
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Formal Pydantic schema for clear Swagger UI auto-documentation
-class ProductAuditRequest(BaseModel):
-    url: str
-
-@app.get("/")
-def check_status():
-    return {"status": "online"}
-
-
-@app.post("/api/v1/audit")
-async def audit_checkout_link(request: Request):
-    """
-    Accepts incoming ecommerce checkout links and runs the AltSpend Audit Matrix.
-    Handles both direct string payloads and structured JSON.
-    """
-    try:
-        # Read the raw request body stream cleanly
-        raw_body = await request.body()
-        body_str = raw_body.decode("utf-8").strip()
+    # 🎯 STEP 1: Detect Input Type (URL vs Raw Text Keyword)
+    is_url = re.match(r'^https?://', raw_input, re.IGNORECASE)
+    
+    if is_url:
+        target_url = raw_input
+    else:
+        # User typed raw text! Resolve it to the top marketplace match automatically.
+        print(f"🔍 Keyword detected: '{raw_input}'. Resolving to top marketplace match...")
+        target_url = scraper.resolve_keyword_to_url(raw_input, default_platform="amazon")
         
-        target_url = body_str
-        
-        # Flexibly parse input if sent as a structured JSON object
-        if body_str.startswith("{") and "url" in body_str:
-            try:
-                body_str = body_str.replace("\n", " ").replace("\r", " ")
-                payload_data = json.loads(body_str)
-                target_url = payload_data.get("url", "").strip()
-            except Exception:
-                # Fallback regex extraction if manual JSON manipulation mangled the string
-                match = re.search(r'"url"\s*:\s*"([^"]+)"', body_str)
-                target_url = match.group(1).strip() if match else body_str
-        
-        # Strip trailing syntax noise or carriage adjustments
-        target_url = target_url.replace("\n", " ").replace("\r", " ")
-
         if not target_url:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Target processing URL cannot be evaluated as empty space."
+                status_code=404, 
+                detail=f"Could not find any matching products for '{raw_input}' on partner platforms."
             )
 
-        # 🚀 FIX 3: Run directly in the main async event loop context.
-        # This honors our persistent browser state perfectly, boosting speeds significantly.
-        print(f"🌐 Commencing dynamic audit tracking pipeline for target URL...")
-        result = await get_product_audit_details(target_url)
+    # 🎯 STEP 2: Extract metadata components from the resolved target URL
+    meta = scraper.scrape_product_meta(target_url)
+    if not meta or not meta["success"]:
+        raise HTTPException(status_code=422, detail=meta.get("error", "Extraction Failure"))
+
+    platform = meta["platform"]
+    price = meta["sticker_price"]
+    
+    # 🎯 STEP 3: Fetch corresponding configuration map rules
+    platform_rules = config_data["platforms"][platform]
+    supported_banks = platform_rules["supported_banks"]
+    rates_matrix = config_data["interest_rates_p_a"]
+
+    audited_emi_options = []
+
+    # 🎯 STEP 4: Run programmatic financial loops
+    for bank in supported_banks:
+        if bank not in rates_matrix:
+            continue
         
-        if not result or not result.get("success"):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=result.get("error", "Could not extract EMI data from the provided URL.")
-            )
+        # Format display name cleanly depending on provider type
+        bank_display_name = "Bajaj Finserv EMI Card" if bank == "BAJAJ" else f"{bank} Bank"
+        
+        for tenure_str, annual_rate in rates_matrix[bank].items():
+            tenure_months = int(tenure_str)
             
-        return result
-        
-    except HTTPException as http_ex:
-        raise http_ex
-    except Exception as e:
-        error_msg = traceback.format_exc()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error_summary": str(e), "traceback": error_msg}
-        )
+            # Compute raw calculations dynamically
+            monthly_emi = calculate_reducing_emi(price, annual_rate, tenure_months)
+            total_repayment = monthly_emi * tenure_months
+            total_interest_charged = max(0.00, total_repayment - price)
+            
+            # Incorporate processing fees and compounding GST rules
+            est_processing_fee = round((price * config_data["global_processing_fee_percent"]) / 100, 2)
+            gst_on_charges = round((total_interest_charged + est_processing_fee) * config_data["gst_rate"], 2)
+            
+            true_net_out_of_pocket = round(total_repayment + est_processing_fee + gst_on_charges, 2)
+            real_premium_over_sticker = round(true_net_out_of_pocket - price, 2)
+
+            audited_emi_options.append({
+                "bank": bank_display_name,
+                "tenure_months": tenure_months,
+                "nominal_monthly_emi": monthly_emi,
+                "upfront_marketplace_discount": 0.00, 
+                "hidden_bank_interest_gst": gst_on_charges,
+                "processing_fee_inclusive_gst": est_processing_fee,
+                "true_net_out_of_pocket": true_net_out_of_pocket,
+                "real_premium_over_sticker": real_premium_over_sticker
+            })
+
+    return {
+        "success": True,
+        "platform_display_name": platform_rules["display_name"],
+        "title": meta["title"],
+        "sticker_price": price,
+        "product_image": meta["product_image"],
+        "resolved_source_url": target_url,  # Returns the actual product link found back to the UI
+        "exclusive_card_perks": platform_rules["exclusive_cards"],
+        "audited_emi_options": audited_emi_options
+    }

@@ -39,7 +39,8 @@ def calculate_reducing_emi(principal, annual_rate, months):
     emi = (principal * r * math.pow(1 + r, months)) / (math.pow(1 + r, months) - 1)
     return round(emi, 2)
 
-@app.post("/api/audit-product")
+# 🛠️ FIXED: Changed routing path to match util/api.js exactly
+@app.post("/api/v1/audit")
 async def audit_product_link(request: SearchRequest):
     raw_input = request.url.strip()
     

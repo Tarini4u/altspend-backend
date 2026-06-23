@@ -2,10 +2,23 @@ import json
 import math
 import re
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dynamic_scraper import ProductScraper
 
 app = FastAPI(title="Altspend Core Fintech Engine API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://altspend.com",
+        "https://tarini4u.github.io",
+        "http://127.0.0.1:5500",
+        "http://localhost:5500"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 scraper = ProductScraper()
 
 # Load central banking configurations once on engine startup

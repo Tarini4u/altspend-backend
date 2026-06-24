@@ -44,11 +44,14 @@ def calculate_reducing_emi(principal, annual_rate, months):
 async def audit_product_link(request: SearchRequest):
     raw_input = request.url.strip()
     
-    # 🎯 STEP 1: Detect Input Type (URL vs Raw Text Keyword)
-    is_url = re.match(r'^https?://', raw_input, re.IGNORECASE)
+    # 🎯 STEP 1: Detect and Isolate URL from Text Block
+    # Looks for any http/https link inside the text and isolates it from free text share-sheets
+    url_pattern = r'(https?://[^\s]+)'
+    url_match = re.search(url_pattern, raw_input, re.IGNORECASE)
     
-    if is_url:
-        target_url = raw_input
+    if url_match:
+        target_url = url_match.group(1)
+        print(f"🔗 Cleanly isolated target URL: {target_url}")
     else:
         # User typed raw text! Resolve it to the top marketplace match automatically.
         print(f"🔍 Keyword detected: '{raw_input}'. Resolving to top marketplace match...")

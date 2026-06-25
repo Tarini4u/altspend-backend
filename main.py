@@ -1,6 +1,7 @@
 import json
 import math
 import re
+import requests  # Cleanly resolves mobile app redirects
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -13,7 +14,8 @@ app.add_middleware(
         "https://altspend.com",
         "https://tarini4u.github.io",
         "http://127.0.0.1:5500",
-        "http://localhost:5500"
+        "http://localhost:5500",
+        "chrome-extension:iikbjbaafbcbfdamgagihekdpijlkmli"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -26,12 +28,10 @@ with open("config.json", "r") as f:
     config_data = json.load(f)
 
 class SearchRequest(BaseModel):
-    # Keeping the field name as 'url' to prevent breaking your current frontend payload
     url: str 
 
 def calculate_reducing_emi(principal, annual_rate, months):
     """Standard regulatory reducing balance EMI formula execution"""
-    # 🎯 STEP 0: Zero-rate guard condition to prevent ZeroDivisionError on No-Cost EMI
     if annual_rate == 0:
         return round(principal / months, 2)
 
@@ -39,18 +39,43 @@ def calculate_reducing_emi(principal, annual_rate, months):
     emi = (principal * r * math.pow(1 + r, months)) / (math.pow(1 + r, months) - 1)
     return round(emi, 2)
 
-# 🛠️ FIXED: Changed routing path to match util/api.js exactly
+def unshorten_url(url: str) -> str:
+    """
+    🛠️ REFINED: Follows redirects for short domains and app deep-links.
+    Uses stream=True to prevent downloading heavy HTML payloads while getting the real URL.
+    """
+    short_domains = ["amzn.to", "amzn.in", "dl.flipkart.com", "fkrt.it", "bit.ly"]
+    
+    if any(domain in url for domain in short_domains):
+        try:
+            # Standard browser headers to prevent marketplace anti-bot firewalls
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5"
+            }
+            # Using GET with stream=True ensures we successfully resolve platforms that reject HEAD requests
+            with requests.get(url, allow_redirects=True, headers=headers, stream=True, timeout=6) as response:
+                print(f"🔄 Resolved short/app URL to: {response.url}")
+                return response.url
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to follow short redirect: {e}")
+            
+    return url
+
 @app.post("/api/v1/audit")
 async def audit_product_link(request: SearchRequest):
     raw_input = request.url.strip()
     
     # 🎯 STEP 1: Detect and Isolate URL from Text Block
-    # Looks for any http/https link inside the text and isolates it from free text share-sheets
+    # Extracts the link even if wrapped in text like "Take a look at this iPhone..."
     url_pattern = r'(https?://[^\s]+)'
     url_match = re.search(url_pattern, raw_input, re.IGNORECASE)
     
     if url_match:
         target_url = url_match.group(1)
+        # Process through the refined unshortener to get the structural URL
+        target_url = unshorten_url(target_url)
         print(f"🔗 Cleanly isolated target URL: {target_url}")
     else:
         # User typed raw text! Resolve it to the top marketplace match automatically.
@@ -83,18 +108,15 @@ async def audit_product_link(request: SearchRequest):
         if bank not in rates_matrix:
             continue
         
-        # Format display name cleanly depending on provider type
         bank_display_name = "Bajaj Finserv EMI Card" if bank == "BAJAJ" else f"{bank} Bank"
         
         for tenure_str, annual_rate in rates_matrix[bank].items():
             tenure_months = int(tenure_str)
             
-            # Compute raw calculations dynamically
             monthly_emi = calculate_reducing_emi(price, annual_rate, tenure_months)
             total_repayment = monthly_emi * tenure_months
             total_interest_charged = max(0.00, total_repayment - price)
             
-            # Incorporate processing fees and compounding GST rules
             est_processing_fee = round((price * config_data["global_processing_fee_percent"]) / 100, 2)
             gst_on_charges = round((total_interest_charged + est_processing_fee) * config_data["gst_rate"], 2)
             
@@ -118,7 +140,7 @@ async def audit_product_link(request: SearchRequest):
         "title": meta["title"],
         "sticker_price": price,
         "product_image": meta["product_image"],
-        "resolved_source_url": target_url,  # Returns the actual product link found back to the UI
+        "resolved_source_url": target_url,  
         "exclusive_card_perks": platform_rules["exclusive_cards"],
         "audited_emi_options": audited_emi_options
     }

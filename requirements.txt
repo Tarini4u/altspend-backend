@@ -5,3 +5,4 @@ beautifulsoup4
 pydantic
 playwright
 curl-cffi
+requests
